@@ -66,6 +66,8 @@ bool Totem::Create(uint32 guidlow, CreatureCreatePos& cPos, CreatureInfo const* 
 
     LoadCreatureAddon();
 
+    SetWalk(true, true);
+
     return true;
 }
 

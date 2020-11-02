@@ -463,7 +463,9 @@ Map::Add(T* obj)
     DEBUG_LOG("%s enters grid[%u,%u]", obj->GetObjectGuid().GetString().c_str(), cell.GridX(), cell.GridY());
 
     obj->GetViewPoint().Event_AddedToWorld(&(*grid)(cell.CellX(), cell.CellY()));
+    obj->SetIsNewObject(true);
     UpdateObjectVisibility(obj, cell, p);
+    obj->SetIsNewObject(false);
 }
 
 template<>
@@ -1096,9 +1098,9 @@ void ScriptedEvent::EndEvent(bool bSuccess)
     m_bEnded = true;
 
     if (bSuccess && m_uiSuccessScript)
-        m_Map.ScriptsStart(sEventScripts, m_uiSuccessScript, GetSourceObject(), GetTargetObject());
+        m_Map.ScriptsStart(sGenericScripts, m_uiSuccessScript, GetSourceObject(), GetTargetObject());
     else if (!bSuccess && m_uiFailureScript)
-        m_Map.ScriptsStart(sEventScripts, m_uiFailureScript, GetSourceObject(), GetTargetObject());
+        m_Map.ScriptsStart(sGenericScripts, m_uiFailureScript, GetSourceObject(), GetTargetObject());
 
     for (const auto& target : m_vTargets)
     {
@@ -1108,9 +1110,9 @@ void ScriptedEvent::EndEvent(bool bSuccess)
             continue;
 
         if (bSuccess && target.uiSuccessScript)
-            m_Map.ScriptsStart(sEventScripts, target.uiSuccessScript, pObject, GetTargetObject());
+            m_Map.ScriptsStart(sGenericScripts, target.uiSuccessScript, pObject, GetTargetObject());
         else if (!bSuccess && target.uiFailureScript)
-            m_Map.ScriptsStart(sEventScripts, target.uiFailureScript, pObject, GetTargetObject());
+            m_Map.ScriptsStart(sGenericScripts, target.uiFailureScript, pObject, GetTargetObject());
     }
 }
 
@@ -1129,11 +1131,11 @@ void ScriptedEvent::SendEventToMainTargets(uint32 uiData)
 {
     if (Creature* pCreatureSource = ToCreature(GetSourceObject()))
         if (pCreatureSource->AI())
-            pCreatureSource->AI()->MapScriptEventHappened(this, uiData);
+            pCreatureSource->AI()->OnScriptEventHappened(m_uiEventId, uiData, nullptr);
 
     if (Creature* pCreatureTarget = ToCreature(GetTargetObject()))
         if (pCreatureTarget->AI())
-            pCreatureTarget->AI()->MapScriptEventHappened(this, uiData);
+            pCreatureTarget->AI()->OnScriptEventHappened(m_uiEventId, uiData, nullptr);
 }
 
 void ScriptedEvent::SendEventToAdditionalTargets(uint32 uiData)
@@ -1142,7 +1144,7 @@ void ScriptedEvent::SendEventToAdditionalTargets(uint32 uiData)
     {
         if (Creature* pCreature = ToCreature(m_Map.GetWorldObject(target.target)))
             if (pCreature->AI())
-                pCreature->AI()->MapScriptEventHappened(this, uiData);
+                pCreature->AI()->OnScriptEventHappened(m_uiEventId, uiData, nullptr);
     }
 
 }
@@ -1162,6 +1164,9 @@ void Map::Remove(Player* player, bool remove)
 
     if (i_data)
         i_data->OnPlayerLeave(player);
+
+    m_mCreatureSummonCount.erase(player->GetGUID());
+    m_mCreatureSummonLimit.erase(player->GetGUID());
 
     if (remove)
         player->CleanupsBeforeDelete();
@@ -1237,6 +1242,9 @@ Map::Remove(T* obj, bool remove)
     DEBUG_LOG("Remove object (GUID: %u TypeId:%u) from grid[%u,%u]", obj->GetGUIDLow(), obj->GetTypeId(), cell.data.Part.grid_x, cell.data.Part.grid_y);
     NGridType* grid = getNGrid(cell.GridX(), cell.GridY());
     MANGOS_ASSERT(grid != nullptr);
+
+    m_mCreatureSummonCount.erase(obj->GetGUID());
+    m_mCreatureSummonLimit.erase(obj->GetGUID());
 
     if (obj->isActiveObject())
         RemoveFromActive(obj);

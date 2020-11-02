@@ -103,7 +103,9 @@ float World::m_VisibleObjectGreyDistance      = 0;
 float  World::m_relocation_lower_limit_sq     = 10.f * 10.f;
 uint32 World::m_relocation_ai_notify_delay    = 1000u;
 
-uint32 World::m_creatureSummonCountLimit      = DEFAULT_CREATURE_SUMMON_LIMIT;
+uint32 World::m_currentMSTime = 0;
+TimePoint World::m_currentTime = TimePoint();
+uint32 World::m_currentDiff = 0;
 
 void LoadGameObjectModelList();
 
@@ -1006,6 +1008,7 @@ void World::LoadConfigSettings(bool reload)
     setConfig(CONFIG_BOOL_ACCURATE_PVP_TIMELINE, "PvP.AccurateTimeline", true);
     setConfig(CONFIG_BOOL_ACCURATE_PVP_REWARDS, "PvP.AccurateRewards", true);
     setConfig(CONFIG_BOOL_ENABLE_DK, "PvP.DishonorableKills", true);
+    setConfig(CONFIG_BOOL_ENABLE_CITY_PROTECTOR, "PvP.CityProtector", true);
 
     // Progression settings
     setConfig(CONFIG_BOOL_ACCURATE_PETS, "Progression.AccuratePetStatistics", true);
@@ -1141,7 +1144,6 @@ void World::LoadConfigSettings(bool reload)
     m_wardenModuleDirectory = sConfig.GetStringDefault("Warden.ModuleDir", "warden_modules");
 
     setConfig(CONFIG_UINT32_CREATURE_SUMMON_LIMIT, "MaxCreatureSummonLimit", DEFAULT_CREATURE_SUMMON_LIMIT);
-    m_creatureSummonCountLimit = getConfig(CONFIG_UINT32_CREATURE_SUMMON_LIMIT);
 
     // Smartlog data
     sLog.InitSmartlogEntries(sConfig.GetStringDefault("Smartlog.ExtraEntries", ""));
@@ -1367,9 +1369,6 @@ void World::SetInitialWorldSettings()
     sLog.outString("Loading Spell Proc Event conditions...");
     sSpellMgr.LoadSpellProcEvents();
 
-    sLog.outString("Loading Spell Bonus Data...");
-    sSpellMgr.LoadSpellBonuses();
-
     sLog.outString("Loading Spell Proc Item Enchant...");
     sSpellMgr.LoadSpellProcItemEnchant();                   // must be after LoadSpellChains
 
@@ -1557,11 +1556,7 @@ void World::SetInitialWorldSettings()
     sLog.outString("Loading Gossip scripts...");
     sScriptMgr.LoadGossipScripts();                         // must be before gossip menu options
 
-    sLog.outString("Loading Gossip menus...");
-    sObjectMgr.LoadGossipMenu();
-
-    sLog.outString("Loading Gossip menu options...");
-    sObjectMgr.LoadGossipMenuItems();
+    sObjectMgr.LoadGossipMenus();
 
     sLog.outString("Loading Vendors...");
     sObjectMgr.LoadVendorTemplates();                       // must be after load ItemTemplate
@@ -1646,6 +1641,7 @@ void World::SetInitialWorldSettings()
     sScriptMgr.LoadCreatureSpellScripts();
     sScriptMgr.LoadGameObjectScripts();                     // must be after load Creature/Gameobject(Template/Data)
     sScriptMgr.LoadEventScripts();                          // must be after load Creature/Gameobject(Template/Data)
+    sScriptMgr.LoadGenericScripts();
     sScriptMgr.LoadCreatureEventAIScripts();
     sLog.outString(">>> Scripts loaded");
     sLog.outString();
@@ -1860,6 +1856,10 @@ public:
 /// Update the World !
 void World::Update(uint32 diff)
 {
+    m_currentMSTime = WorldTimer::getMSTime();
+    m_currentTime = std::chrono::time_point_cast<std::chrono::milliseconds>(Clock::now());
+    m_currentDiff = diff;
+
     ///- Update the different timers
     for (auto& timer : m_timers)
     {

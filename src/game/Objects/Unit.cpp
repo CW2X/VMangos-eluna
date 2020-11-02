@@ -85,26 +85,6 @@ float baseMoveSpeed[MAX_MOVE_TYPE] =
     3.141594f,                                              // MOVE_TURN_RATE
 };
 
-
-////////////////////////////////////////////////////////////
-// Methods of class GlobalCooldownMgr
-
-bool GlobalCooldownMgr::HasGlobalCooldown(SpellEntry const* spellInfo) const
-{
-    GlobalCooldownList::const_iterator itr = m_GlobalCooldowns.find(spellInfo->StartRecoveryCategory);
-    return itr != m_GlobalCooldowns.end() && itr->second.duration && WorldTimer::getMSTimeDiff(itr->second.cast_time, WorldTimer::getMSTime()) < itr->second.duration;
-}
-
-void GlobalCooldownMgr::AddGlobalCooldown(SpellEntry const* spellInfo, uint32 gcd)
-{
-    m_GlobalCooldowns[spellInfo->StartRecoveryCategory] = GlobalCooldown(gcd, WorldTimer::getMSTime());
-}
-
-void GlobalCooldownMgr::CancelGlobalCooldown(SpellEntry const* spellInfo)
-{
-    m_GlobalCooldowns[spellInfo->StartRecoveryCategory].duration = 0;
-}
-
 ////////////////////////////////////////////////////////////
 // Methods of class Unit
 
@@ -250,29 +230,9 @@ void Unit::Update(uint32 update_diff, uint32 p_time)
     elunaEvents->Update(update_diff);
 #endif /* ENABLE_ELUNA */    
 
-    // Nostalrius : systeme de contresort des mobs.
-    // Boucle 1 pour regler les timers
-    for (auto& it : m_prohibitSpell)
-    {
-        if (it.RestingMsTime < update_diff)
-            it.RestingMsTime = 0;
-        else
-            it.RestingMsTime -= update_diff;
-    }
-    // Boucle 2 : supprimer les sorts avec Timer=0
-    for (ProhibitSpellList::iterator it = m_prohibitSpell.begin(); it != m_prohibitSpell.end();)
-    {
-        if (it->RestingMsTime == 0)
-        {
-            m_prohibitSpell.erase(it);
-            it = m_prohibitSpell.begin();
-            continue;
-        }
-        ++it;
-    }
-
     // Buffer spell system update time to save on performance when players are updated twice per
     // world update. We do not need to update spells when the interval is only a few ms (~10ms)
+    UpdateCooldowns(sWorld.GetCurrentClockTime());
     m_spellUpdateTimeBuffer += update_diff;
     if (m_spellUpdateTimeBuffer >= UNIT_SPELL_UPDATE_TIME_BUFFER)
     {
@@ -1263,7 +1223,7 @@ void Unit::Kill(Unit* pVictim, SpellEntry const* spellProto, bool durabilityLoss
                 playerKiller = pPlayerTap;
 
             if (playerKiller)
-                pCreatureVictim->GetMap()->BindToInstanceOrRaid(playerKiller, pCreatureVictim->GetRespawnTimeEx(), pCreatureVictim->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_INSTANCE_BIND);
+                pCreatureVictim->GetMap()->BindToInstanceOrRaid(playerKiller, pCreatureVictim->GetRespawnTimeEx(), pCreatureVictim->HasExtraFlag(CREATURE_FLAG_EXTRA_INSTANCE_BIND));
         }
     }
 
@@ -1325,7 +1285,7 @@ uint32 Unit::SpellNonMeleeDamageLog(Unit* pVictim, uint32 spellId, uint32 damage
 {
     SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(spellId);
     SpellNonMeleeDamage damageInfo(this, pVictim, spellInfo->Id, SpellSchools(spellInfo->School));
-    CalculateSpellDamage(&damageInfo, damage, spellInfo);
+    CalculateSpellDamage(&damageInfo, damage, spellInfo, EFFECT_INDEX_0);
     damageInfo.target->CalculateAbsorbResistBlock(this, &damageInfo, spellInfo);
     DealDamageMods(damageInfo.target, damageInfo.damage, &damageInfo.absorb);
     SendSpellNonMeleeDamageLog(&damageInfo);
@@ -1392,8 +1352,8 @@ void Unit::CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo* da
 
         subDamage->damage = CalculateDamage(damageInfo->attackType, false, i);
         // Add melee damage bonus
-        subDamage->damage = MeleeDamageBonusDone(damageInfo->target, subDamage->damage, damageInfo->attackType, nullptr, DIRECT_DAMAGE, 1, nullptr, i == 0);
-        subDamage->damage = damageInfo->target->MeleeDamageBonusTaken(this, subDamage->damage, damageInfo->attackType, nullptr, DIRECT_DAMAGE, 1, nullptr, i == 0);
+        subDamage->damage = MeleeDamageBonusDone(damageInfo->target, subDamage->damage, damageInfo->attackType, nullptr, EFFECT_INDEX_0, DIRECT_DAMAGE, 1, nullptr, i == 0);
+        subDamage->damage = damageInfo->target->MeleeDamageBonusTaken(this, subDamage->damage, damageInfo->attackType, nullptr, EFFECT_INDEX_0, DIRECT_DAMAGE, 1, nullptr, i == 0);
 
         // Calculate armor reduction
         if (subDamage->damageSchoolMask == SPELL_SCHOOL_MASK_NORMAL)
@@ -2191,7 +2151,6 @@ MeleeHitOutcome Unit::RollMeleeOutcomeAgainst(Unit const* pVictim, WeaponAttackT
 
 MeleeHitOutcome Unit::RollMeleeOutcomeAgainst(Unit const* pVictim, WeaponAttackType attType, int32 crit_chance, int32 miss_chance, int32 dodge_chance, int32 parry_chance, int32 block_chance, bool SpellCasted) const
 {
-    // Nostalrius : cheat.
     if (IsPlayer() && ToPlayer()->HasCheatOption(PLAYER_CHEAT_ALWAYS_CRIT))
         return MELEE_HIT_CRIT;
 
@@ -2257,9 +2216,9 @@ MeleeHitOutcome Unit::RollMeleeOutcomeAgainst(Unit const* pVictim, WeaponAttackT
 
     // parry chances
     // check if attack comes from behind, nobody can parry or block if attacker is behind
-    if (!from_behind)
+    if (!from_behind && (parry_chance > 0))
     {
-        if (parry_chance > 0 && (pVictim->IsPlayer() || !(((Creature*)pVictim)->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_NO_PARRY)))
+        if (pVictim->IsPlayer() || !((Creature*)pVictim)->HasExtraFlag(CREATURE_FLAG_EXTRA_NO_PARRY))
         {
             parry_chance -= parrySkillBonus;
 
@@ -2306,9 +2265,9 @@ MeleeHitOutcome Unit::RollMeleeOutcomeAgainst(Unit const* pVictim, WeaponAttackT
 
     // block chances
     // check if attack comes from behind, nobody can parry or block if attacker is behind
-    if (!from_behind)
+    if (!from_behind && (block_chance > 0))
     {
-        if ((pVictim->IsPlayer() || !(((Creature*)pVictim)->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_NO_BLOCK))
+        if ((pVictim->IsPlayer() || !((Creature*)pVictim)->HasExtraFlag(CREATURE_FLAG_EXTRA_NO_BLOCK))
           && !(IsCreature() && GetMeleeDamageSchoolMask() != SPELL_SCHOOL_MASK_NORMAL))  // can't block elemental melee attacks from mobs
         {
             block_chance -= blockSkillBonus;
@@ -2350,10 +2309,10 @@ MeleeHitOutcome Unit::RollMeleeOutcomeAgainst(Unit const* pVictim, WeaponAttackT
     }
 
     if ((!IsPlayer() && !IsPet()) &&
-        !(((Creature*)this)->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_NO_CRUSH) &&
+        !((Creature*)this)->HasExtraFlag(CREATURE_FLAG_EXTRA_NO_CRUSH) &&
         !SpellCasted /*Only autoattack can be crashing blow*/)
     {
-        if (((Creature*)this)->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_ALWAYS_CRUSH)
+        if (((Creature*)this)->HasExtraFlag(CREATURE_FLAG_EXTRA_ALWAYS_CRUSH))
         {
             return MELEE_HIT_CRUSHING;
         }
@@ -2473,7 +2432,7 @@ bool Unit::IsSpellBlocked(WorldObject* pCaster, Unit* pVictim, SpellEntry const*
     // Check creatures flags_extra for disable block
     if (Creature const* pCreature = ToCreature())
     {
-        if (pCreature->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_NO_BLOCK)
+        if (pCreature->HasExtraFlag(CREATURE_FLAG_EXTRA_NO_BLOCK))
             return false;
     }
 
@@ -2850,29 +2809,33 @@ void Unit::_UpdateSpells(uint32 time)
 
 void Unit::_UpdateAutoRepeatSpell()
 {
-    //check "realtime" interrupts
-    if ((IsPlayer() && ((Player*)this)->IsMoving()) || IsNonMeleeSpellCasted(false, false, true))
+    // check "realtime" interrupts
+    if ((IsPlayer() && IsMoving()) || IsNonMeleeSpellCasted(false, false, true))
     {
         // cancel wand shoot
         if (m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_spellInfo->Category == 351)
             InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
+        // set 0.5 second wind-up time.
         m_AutoRepeatFirstCast = true;
         return;
     }
 
-    //apply delay
+    // apply delay
     if (m_AutoRepeatFirstCast && GetAttackTimer(RANGED_ATTACK) < 500)
         SetAttackTimer(RANGED_ATTACK, 500);
     m_AutoRepeatFirstCast = false;
 
-    //castroutine
+    // castroutine
     if (IsAttackReady(RANGED_ATTACK))
     {
         // Check if able to cast
         // We need to update pointers before calling CheckCast !
         m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->UpdatePointers();
         SpellCastResult result = m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->CheckCast(true);
-        if (result == SPELL_FAILED_MOVING) // Just delay it if moving
+
+        // Just delay it if moving
+        if (result == SPELL_FAILED_MOVING ||
+            result == SPELL_FAILED_NOT_READY)
             return;
 
         if (result != SPELL_CAST_OK)
@@ -4057,15 +4020,12 @@ void Unit::AddGameObject(GameObject* pGo)
 
     if (pGo->GetSpellId())
     {
-        if (Player* pPlayer = ToPlayer())
+        if (SpellEntry const* pCreateBySpell = sSpellMgr.GetSpellEntry(pGo->GetSpellId()))
         {
-            if (SpellEntry const* pCreateBySpell = sSpellMgr.GetSpellEntry(pGo->GetSpellId()))
-            {
-                // Need disable spell use for owner
-                if (pCreateBySpell->HasAttribute(SPELL_ATTR_DISABLED_WHILE_ACTIVE))
-                    // note: item based cooldowns and cooldown spell mods with charges ignored (unknown existing cases)
-                    pPlayer->AddSpellAndCategoryCooldowns(pCreateBySpell, 0, nullptr, true);
-            }
+            // Need disable spell use for owner
+            if (pCreateBySpell->HasAttribute(SPELL_ATTR_DISABLED_WHILE_ACTIVE))
+                // note: item based cooldowns and cooldown spell mods with charges ignored (unknown existing cases)
+                AddCooldown(*pCreateBySpell);
         }
     }
 }
@@ -4087,7 +4047,7 @@ void Unit::RemoveGameObject(GameObject* pGo, bool del)
             if (pCreateBySpell->HasAttribute(SPELL_ATTR_DISABLED_WHILE_ACTIVE) &&
                 pGo->GetGoType() != GAMEOBJECT_TYPE_SUMMONING_RITUAL)
                 // note: item based cooldowns and cooldown spell mods with charges ignored (unknown existing cases)
-                CooldownEvent(pCreateBySpell);
+                AddCooldown(*pCreateBySpell);
         }
         
     }
@@ -5050,7 +5010,7 @@ void Unit::SendEnvironmentalDamageLog(uint8 type, uint32 damage, uint32 absorb, 
  * Calculates target part of spell damage bonuses,
  * will be called on each tick for periodic damage over time auras
  */
-uint32 Unit::SpellDamageBonusTaken(WorldObject* pCaster, SpellEntry const* spellProto, uint32 pdamage, DamageEffectType damagetype, uint32 stack, Spell* spell) const
+uint32 Unit::SpellDamageBonusTaken(WorldObject* pCaster, SpellEntry const* spellProto, SpellEffectIndex effectIndex, uint32 pdamage, DamageEffectType damagetype, uint32 stack, Spell* spell) const
 {
     if (!spellProto || !pCaster || damagetype == DIRECT_DAMAGE)
         return pdamage;
@@ -5068,7 +5028,7 @@ uint32 Unit::SpellDamageBonusTaken(WorldObject* pCaster, SpellEntry const* spell
     int32 TakenAdvertisedBenefit = SpellBaseDamageBonusTaken(spellProto->GetSpellSchoolMask());
 
     // apply benefit affected by spell power implicit coeffs and spell level penalties
-    TakenTotal = SpellBonusWithCoeffs(spellProto, TakenTotal, TakenAdvertisedBenefit, 0, damagetype, false, pCaster, spell);
+    TakenTotal = SpellBonusWithCoeffs(spellProto, effectIndex, TakenTotal, TakenAdvertisedBenefit, 0, damagetype, false, pCaster, spell);
 
     float tmpDamage = (int32(pdamage) + TakenTotal * int32(stack)) * TakenTotalMod;
 
@@ -5193,7 +5153,7 @@ bool Unit::IsSpellCrit(Unit const* pVictim, SpellEntry const* spellProto, SpellS
  * Calculates target part of healing spell bonuses,
  * will be called on each tick for periodic damage over time auras
  */
-uint32 Unit::SpellHealingBonusTaken(WorldObject* pCaster, SpellEntry const* spellProto, int32 healamount, DamageEffectType damagetype, uint32 stack, Spell* spell) const
+uint32 Unit::SpellHealingBonusTaken(WorldObject* pCaster, SpellEntry const* spellProto, SpellEffectIndex effectIndex, int32 healamount, DamageEffectType damagetype, uint32 stack, Spell* spell) const
 {
     float  TakenTotalMod = 1.0f;
 
@@ -5238,7 +5198,7 @@ uint32 Unit::SpellHealingBonusTaken(WorldObject* pCaster, SpellEntry const* spel
         }
     }
     // apply benefit affected by spell power implicit coeffs and spell level penalties
-    TakenTotal = SpellBonusWithCoeffs(spellProto, TakenTotal, TakenAdvertisedBenefit, 0, damagetype, false, pCaster, spell);
+    TakenTotal = SpellBonusWithCoeffs(spellProto, effectIndex, TakenTotal, TakenAdvertisedBenefit, 0, damagetype, false, pCaster, spell);
 
     // Taken mods
     // Healing Wave cast
@@ -5394,7 +5354,7 @@ bool Unit::IsImmuneToSchool(SpellEntry const* spellInfo, uint8 effectMask) const
  * Calculates target part of melee damage bonuses,
  * will be called on each tick for periodic damage over time auras
  */
-uint32 Unit::MeleeDamageBonusTaken(WorldObject* pCaster, uint32 pdamage, WeaponAttackType attType, SpellEntry const* spellProto, DamageEffectType damagetype, uint32 stack, Spell* spell, bool flat)
+uint32 Unit::MeleeDamageBonusTaken(WorldObject* pCaster, uint32 pdamage, WeaponAttackType attType, SpellEntry const* spellProto, SpellEffectIndex effectIndex, DamageEffectType damagetype, uint32 stack, Spell* spell, bool flat)
 {
     if (!pCaster)
         return pdamage;
@@ -5445,7 +5405,7 @@ uint32 Unit::MeleeDamageBonusTaken(WorldObject* pCaster, uint32 pdamage, WeaponA
     if (!isWeaponDamageBasedSpell)
     {
         // apply benefit affected by spell power implicit coeffs and spell level penalties
-        TakenFlat = SpellBonusWithCoeffs(spellProto, 0, TakenFlat, 0, damagetype, false, pCaster, spell);
+        TakenFlat = SpellBonusWithCoeffs(spellProto, effectIndex, 0, TakenFlat, 0, damagetype, false, pCaster, spell);
     }
 
     if (!flat)
@@ -5528,6 +5488,17 @@ UnitDismountResult Unit::Unmount(bool from_aura)
     return DISMOUNTRESULT_OK;
 }
 
+bool Unit::IsShapeShifted() const
+{
+    // Mirroring clientside gameplay logic
+    if (ShapeshiftForm form = GetShapeshiftForm())
+    {
+        if (SpellShapeshiftFormEntry const* ssEntry = sSpellShapeshiftFormStore.LookupEntry(form))
+            return !(ssEntry->flags1 & SHAPESHIFT_FORM_FLAG_ALLOW_ACTIVITY);
+    }
+    return false;
+}
+
 bool Unit::IsInDisallowedMountForm() const
 {
     ShapeshiftForm form = GetShapeshiftForm();
@@ -5603,7 +5574,7 @@ void Unit::SetInCombatState(bool bPvP, Unit* pEnemy)
         OnEnterCombat(pEnemy, true);
 
         // Some bosses are set into combat with zone
-        if (GetMap()->IsDungeon() && (pCreature->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_AGGRO_ZONE) && pEnemy && pEnemy->IsControlledByPlayer())
+        if (GetMap()->IsDungeon() && pCreature->HasExtraFlag(CREATURE_FLAG_EXTRA_AGGRO_ZONE) && pEnemy && pEnemy->IsControlledByPlayer())
             pCreature->SetInCombatWithZone();
         if (Spell* spell = m_currentSpells[CURRENT_CHANNELED_SPELL])
             if (spell->getState() == SPELL_STATE_CASTING)
@@ -5750,6 +5721,9 @@ bool Unit::IsTargetableForAttack(bool inverseAlive /*=false*/, bool isAttackerPl
         return false;
 
     if (isAttackerPlayer && HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER))
+        return false;
+
+    if (!isAttackerPlayer && HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC))
         return false;
 
     // Players or their pets can attack feigned players
@@ -6039,7 +6013,7 @@ bool Unit::IsVisibleForOrDetect(WorldObject const* pDetector, WorldObject const*
 
     if (Creature const* pCreature = ToCreature())
     {
-        if ((pCreature->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_ONLY_VISIBLE_TO_FRIENDLY) &&
+        if (pCreature->HasExtraFlag(CREATURE_FLAG_EXTRA_ONLY_VISIBLE_TO_FRIENDLY) &&
             !pCreature->IsFriendlyTo(pDetector))
             return false;
     } 
@@ -6947,7 +6921,7 @@ bool Unit::CanHaveThreatList() const
     if (pCreature->GetCharmerGuid().IsPlayer())
         return false;
 
-    if (pCreature->GetCreatureInfo()->flags_extra & CREATURE_FLAG_EXTRA_NO_THREAT_LIST)
+    if (pCreature->HasExtraFlag(CREATURE_FLAG_EXTRA_NO_THREAT_LIST))
         return false;
 
     return true;
@@ -9706,6 +9680,9 @@ bool Unit::IsAttackableByAOE(bool requireDeadTarget, bool isCasterPlayer) const
     if (isCasterPlayer && HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PLAYER))
         return false;
 
+    if (!isCasterPlayer && HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_NPC))
+        return false;
+
     if (Player const* pPlayer = ToPlayer())
         if (pPlayer->IsGameMaster())
             return false;
@@ -9734,26 +9711,6 @@ bool Unit::IsImmuneToMechanic(Mechanics mechanic) const
         if (itr.type == mechanic)
             return true;
 
-    return false;
-}
-
-void Unit::ProhibitSpellSchool(SpellSchoolMask idSchoolMask, uint32 unTimeMs)
-{
-    // Still needed ... ?
-    ProhibitSpellInfo inf;
-    inf.SchoolMask = idSchoolMask;
-    inf.RestingMsTime = unTimeMs;
-    m_prohibitSpell.push_back(inf);
-}
-
-bool Unit::IsSpellProhibited(SpellEntry const* pSpell) const
-{
-    uint32 spellSchoolMask = pSpell->GetSpellSchoolMask();
-    for (const auto& it : m_prohibitSpell)
-    {
-        if (it.SchoolMask & spellSchoolMask)
-            return true;
-    }
     return false;
 }
 
@@ -10193,26 +10150,6 @@ void Unit::RestoreMovement()
     }
 }
 
-/** Spell cooldown management system. Shared by Players, Creatures, Pets, ... */
-void Unit::RemoveSpellCooldown(uint32 spell_id, bool update /* = false */)
-{
-    m_spellCooldowns.erase(spell_id);
-
-    if (update)
-        if (Player* player = GetAffectingPlayer())
-            player->SendClearCooldown(spell_id, this);
-}
-
-bool Unit::HasSpellCategoryCooldown(uint32 cat) const
-{
-    if (!cat)
-        return false;
-    for (const auto& it : m_spellCooldowns)
-        if (it.second.cat == cat && it.second.categoryEnd > time(nullptr))
-            return true;
-    return false;
-}
-
 void Unit::RemoveSpellCategoryCooldown(uint32 cat, bool update /* = false */)
 {
 	SpellCategoriesStore::const_iterator ct = sSpellCategoriesStore.find(cat);
@@ -10227,17 +10164,6 @@ void Unit::RemoveSpellCategoryCooldown(uint32 cat, bool update /* = false */)
 		else
 			++i;
 	}
-}
-
-void Unit::RemoveAllSpellCooldown()
-{
-    if (!m_spellCooldowns.empty())
-    {
-        if (Player* pPlayer = GetAffectingPlayer())
-            pPlayer->SendClearAllCooldowns(this);
-
-        m_spellCooldowns.clear();
-    }
 }
 
 void Unit::SetTransformScale(float scale)
@@ -10267,148 +10193,41 @@ void Unit::SetNativeScale(float scale)
     m_nativeScale = scale;
 }
 
-void Unit::CooldownEvent(SpellEntry const* spellInfo, uint32 itemId, Spell* spell)
-{
-    // start cooldowns at server side, if any
-    AddSpellAndCategoryCooldowns(spellInfo, itemId, spell);
-
-    // Send activate cooldown timer (possible 0) at client side
-    if (Player* player = GetAffectingPlayer())
-    {
-        WorldPacket data(SMSG_COOLDOWN_EVENT, (4 + 8));
-        data << uint32(spellInfo->Id);
-        data << GetObjectGuid();
-        player->SendDirectMessage(&data);
-    }
-}
-
-void Unit::AddSpellAndCategoryCooldowns(SpellEntry const* spellInfo, uint32 itemId, Spell* spell, bool infinityCooldown)
-{
-    // init cooldown values
-    uint32 cat   = 0;
-    int32 rec    = -1;
-    int32 catrec = -1;
-
-    // some special item spells without correct cooldown in SpellInfo
-    // cooldown information stored in item prototype
-    // This used in same way in WorldSession::HandleItemQuerySingleOpcode data sending to client.
-
-    if (itemId)
-    {
-        if (ItemPrototype const* proto = ObjectMgr::GetItemPrototype(itemId))
-        {
-            for (const auto& itr : proto->Spells)
-            {
-                if (itr.SpellId == spellInfo->Id)
-                {
-                    cat    = itr.SpellCategory;
-                    rec    = itr.SpellCooldown;
-                    catrec = itr.SpellCategoryCooldown;
-                    break;
-                }
-            }
-        }
-    }
-
-    // if no cooldown found above then base at DBC data
-    if (rec < 0 && catrec < 0)
-    {
-        cat = spellInfo->Category;
-        rec = spellInfo->RecoveryTime;
-        catrec = spellInfo->CategoryRecoveryTime;
-    }
-
-    time_t curTime = time(nullptr);
-
-    time_t catrecTime;
-    time_t recTime;
-
-    // overwrite time for selected category
-    if (infinityCooldown)
-    {
-        // use +MONTH as infinity mark for spell cooldown (will checked as MONTH/2 at save ans skipped)
-        // but not allow ignore until reset or re-login
-        catrecTime = catrec > 0 ? curTime + infinityCooldownDelay : 0;
-        recTime    = rec    > 0 ? curTime + infinityCooldownDelay : catrecTime;
-    }
-    else
-    {
-        // shoot spells used equipped item cooldown values already assigned in GetAttackTime(RANGED_ATTACK)
-        // prevent 0 cooldowns set by another way
-        if (rec <= 0 && catrec <= 0 && (cat == 76 || cat == 351))
-            rec = GetAttackTime(RANGED_ATTACK);
-
-        if (rec > 0 || catrec > 0)
-        {
-            if (Player* modOwner = GetSpellModOwner())
-            {
-                // Now we have cooldown data (if found any), time to apply mods
-                if (rec > 0)
-                    modOwner->ApplySpellMod(spellInfo->Id, SPELLMOD_COOLDOWN, rec, spell);
-
-                if (catrec > 0)
-                    modOwner->ApplySpellMod(spellInfo->Id, SPELLMOD_COOLDOWN, catrec, spell);
-            }
-            if (Player* player = GetAffectingPlayer())
-                if (player != this)
-                    player->SendSpellCooldown(spellInfo->Id, rec > catrec ? rec : catrec, GetObjectGuid());
-        }
-
-        // replace negative cooldowns by 0
-        if (rec < 0) rec = 0;
-        if (catrec < 0) catrec = 0;
-
-        // Hackfix: minimum cooldown for controlled creatures
-        if (!rec && !catrec && IsCreature() && GetCharmerGuid().IsPlayer())
-            rec = 1500; // Global cooldown
-
-        // no cooldown after applying spell mods
-        if (rec == 0 && catrec == 0)
-            return;
-
-        catrecTime = catrec ? curTime + catrec / IN_MILLISECONDS : 0;
-        recTime    = rec ? curTime + rec / IN_MILLISECONDS : catrecTime;
-    }
-
-    // self spell cooldown
-    if (recTime > 0)
-        AddSpellCooldown(spellInfo->Id, itemId, recTime, catrecTime, cat);
-}
-
-void Unit::AddSpellCooldown(uint32 spellid, uint32 itemid, time_t endTime, time_t categoryEndTime, uint32 cat)
-{
-    // Do not replace longer cooldown
-    SpellCooldowns::iterator it = m_spellCooldowns.find(spellid);
-    if (it != m_spellCooldowns.end())
-    {
-        it->second.end = endTime;
-        it->second.categoryEnd = categoryEndTime;
-        return;
-    }
-    SpellCooldown sc;
-    sc.end = endTime;
-    sc.categoryEnd = categoryEndTime;
-    sc.itemid = itemid;
-    sc.cat = cat;
-    m_spellCooldowns[spellid] = sc;
-}
-
 void Unit::WritePetSpellsCooldown(WorldPacket& data) const
 {
-    uint8 cooldownsCount = GetSpellCooldownMap().size();
-    data << uint8(cooldownsCount);
+    // write cooldown data
+    uint32 cdCount = 0;
+    const size_t cdCountPos = data.wpos();
+    data << uint16(0);
+    auto currTime = sWorld.GetCurrentClockTime();
 
-    time_t curTime = time(nullptr);
-
-    for (const auto& itr : GetSpellCooldownMap())
+    for (auto& cdItr : m_cooldownMap)
     {
-        //time_t cooldown = (itr->second > curTime) ? (itr->second - curTime) * IN_MILLISECONDS : 0;
+        auto& cdData = cdItr.second;
+        TimePoint spellRecTime = currTime;
+        TimePoint catRecTime = currTime;
+        cdData->GetSpellCDExpireTime(spellRecTime);
+        cdData->GetCatCDExpireTime(catRecTime);
+        uint32 spellCDDuration = 0;
+        uint32 catCDDuration = 0;
+        if (spellRecTime > currTime)
+            spellCDDuration = std::chrono::duration_cast<std::chrono::milliseconds>(spellRecTime - currTime).count();
+        if (catRecTime > currTime)
+            catCDDuration = std::chrono::duration_cast<std::chrono::milliseconds>(catRecTime - currTime).count();
 
-        data << uint16(itr.first);                                                              // spellid
-        data << uint16(0);                                                                      // spell category?
-        data << uint32(IN_MILLISECONDS * (itr.second.end - curTime));                           // cooldown
-        data << uint32(0);                  // category cooldown
+        if (!spellCDDuration && !catCDDuration && !cdData->IsPermanent())
+            continue;
+
+        if (cdData->IsPermanent())
+            catCDDuration |= 0x8000000;
+
+        data << uint32(cdData->GetSpellId());
+        data << uint16(cdData->GetCategory());              // spell category
+        data << uint32(spellCDDuration);                    // cooldown
+        data << uint32(catCDDuration);                      // category cooldown
+        ++cdCount;
     }
+    data.put<uint16>(cdCountPos, cdCount);
 }
 
 void Unit::InitPlayerDisplayIds()

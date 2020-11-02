@@ -37,7 +37,7 @@
 #include "LootMgr.h"
 #include "Chat.h"
 #include "ScriptMgr.h"
-#include <zlib/zlib.h>
+#include <zlib.h>
 #include "ObjectAccessor.h"
 #include "Object.h"
 #include "BattleGround.h"
@@ -895,10 +895,6 @@ void WorldSession::HandleAreaTriggerOpcode(WorldPacket& recv_data)
         if (pTeleTrigger->destination.mapId != corpseMapId)
             if (AreaTriggerTeleport const* corpseAt = sObjectMgr.GetMapEntranceTrigger(corpseMapId))
                 pTeleTrigger = corpseAt;
-
-        // now we can resurrect player, and then check teleport requirements
-        pPlayer->ResurrectPlayer(0.5f);
-        pPlayer->SpawnCorpseBones();
     }
 
     if (!pPlayer->IsGameMaster() && !pPlayer->HasCheatOption(PLAYER_CHEAT_TRIGGER_PASS))

@@ -492,12 +492,13 @@ include_directories(
   ${TBB_INCLUDE_DIRS}
   ${ACE_INCLUDE_DIR}
   ${OPENSSL_INCLUDE_DIR}
+  ${ZLIB_INCLUDE_DIRS}
   $<$<BOOL:${SCRIPT_LIB_ELUNA}>:${SRC_GRP_ELUNA}>
 )
 
 if(WIN32)
   include_directories(
-    ${CMAKE_SOURCE_DIR}/dep/include-windows
+    ${CMAKE_SOURCE_DIR}/dep/windows/include
   )
 endif()
 
